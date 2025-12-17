@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, forwardRef, useImperativeHandle } from 'react';
 import { MessageSquare, X, Send, Bot, User, Loader2 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 
@@ -8,7 +8,13 @@ interface Message {
   text: string;
 }
 
-const ChatAgent: React.FC = () => {
+export interface ChatAgentHandle {
+  handleExternalMessage: (text: string) => void;
+  setDraft: (text: string) => void;
+  setIsOpen: (isOpen: boolean) => void;
+}
+
+const ChatAgent = forwardRef<ChatAgentHandle, {}>((props, ref) => {
   const [isOpen, setIsOpen] = useState(false);
   const [messages, setMessages] = useState<Message[]>([
     { id: '1', type: 'bot', text: 'Identity verified. I am Samwel\'s autonomous assistant. How can I help you navigate his capabilities?' }
@@ -16,55 +22,94 @@ const ChatAgent: React.FC = () => {
   const [input, setInput] = useState('');
   const [isTyping, setIsTyping] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
-
-  // Generate a unique session ID for this user session (persists until page refresh)
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  
+  // Persist session ID
   const sessionIdRef = useRef(`session_${Math.random().toString(36).substring(7)}`);
+
+  // Expose methods to parent components via ref
+  useImperativeHandle(ref, () => ({
+    handleExternalMessage: (text: string) => {
+      setIsOpen(true);
+      sendMessage(text);
+    },
+    setDraft: (text: string) => {
+      setIsOpen(true);
+      setInput(text);
+      // Auto-resize textarea after setting draft
+      setTimeout(() => {
+        if (textareaRef.current) {
+          textareaRef.current.style.height = 'auto';
+          textareaRef.current.style.height = textareaRef.current.scrollHeight + 'px';
+          textareaRef.current.focus();
+        }
+      }, 100);
+    },
+    setIsOpen
+  }));
 
   useEffect(() => {
     if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
   }, [messages, isTyping]);
 
-  const handleSend = async () => {
-    if (!input.trim()) return;
+  // Auto-resize textarea logic
+  useEffect(() => {
+    if (textareaRef.current) {
+      textareaRef.current.style.height = 'auto';
+      textareaRef.current.style.height = Math.min(textareaRef.current.scrollHeight, 120) + 'px';
+    }
+  }, [input]);
 
-    const userMsg: Message = { id: Date.now().toString(), type: 'user', text: input };
+  const sendMessage = async (text: string) => {
+    if (!text.trim()) return;
+
+    const userMsg: Message = { id: Date.now().toString(), type: 'user', text };
     setMessages(prev => [...prev, userMsg]);
     setInput('');
+    if (textareaRef.current) textareaRef.current.style.height = 'auto'; // Reset height
     setIsTyping(true);
 
     try {
-      // Connect to n8n Chat Webhook
+      // --- SECURE ENV VARIABLE ---
       const webhookUrl = import.meta.env.VITE_N8N_CHAT_WEBHOOK;
       
       if (!webhookUrl) {
-         // Fallback for demo if no env var
-         setTimeout(() => {
-            setMessages(prev => [...prev, { id: Date.now().toString(), type: 'bot', text: "I am currently in demo mode. Please connect me to your n8n webhook to activate my full reasoning capabilities." }]);
-            setIsTyping(false);
-         }, 1000);
-         return;
+        throw new Error("Webhook URL not configured in .env file");
       }
 
-      // Send chatInput AND sessionId to n8n
       const response = await fetch(webhookUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
-          chatInput: userMsg.text,
+          chatInput: text,
           sessionId: sessionIdRef.current 
         })
       });
 
       const data = await response.json();
-      // Handle the 'output' field from n8n (or fallback if empty)
       const botText = data.output || data.text || "Systems nominal, but I received an empty response.";
 
       setMessages(prev => [...prev, { id: (Date.now() + 1).toString(), type: 'bot', text: botText }]);
     } catch (error) {
       console.error("Agent Error:", error);
-      setMessages(prev => [...prev, { id: (Date.now() + 1).toString(), type: 'bot', text: "Error connecting to Agent mainframe." }]);
+      const errorMessage = error instanceof Error && error.message.includes(".env") 
+        ? "System Config Error: Webhook URL missing."
+        : "Error connecting to Agent mainframe.";
+      
+      setMessages(prev => [...prev, { id: (Date.now() + 1).toString(), type: 'bot', text: errorMessage }]);
     } finally {
       setIsTyping(false);
+    }
+  };
+
+  const handleSendClick = () => {
+    sendMessage(input);
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      handleSendClick();
     }
   };
 
@@ -76,7 +121,7 @@ const ChatAgent: React.FC = () => {
             initial={{ opacity: 0, y: 20, scale: 0.95 }}
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: 20, scale: 0.95 }}
-            className="fixed bottom-24 right-6 w-80 md:w-96 h-[500px] bg-enterprise-950 border border-enterprise-accent/30 rounded-2xl shadow-2xl z-50 flex flex-col overflow-hidden"
+            className="fixed bottom-24 right-6 w-96 h-[600px] bg-enterprise-950 border border-enterprise-accent/30 rounded-2xl shadow-2xl z-50 flex flex-col overflow-hidden"
           >
             <div className="p-4 bg-enterprise-900 border-b border-enterprise-800 flex justify-between items-center">
               <div className="flex items-center gap-2">
@@ -95,7 +140,7 @@ const ChatAgent: React.FC = () => {
                   <div className={`w-8 h-8 rounded flex items-center justify-center shrink-0 ${msg.type === 'bot' ? 'bg-enterprise-accent text-black' : 'bg-enterprise-800 text-gray-300'}`}>
                     {msg.type === 'bot' ? <Bot size={16} /> : <User size={16} />}
                   </div>
-                  <div className={`p-3 rounded-lg text-sm max-w-[80%] ${
+                  <div className={`p-3 rounded-lg text-sm max-w-[85%] whitespace-pre-wrap ${
                     msg.type === 'bot' 
                       ? 'bg-enterprise-900 border border-enterprise-800 text-gray-200 rounded-tl-none' 
                       : 'bg-enterprise-accent/10 border border-enterprise-accent/20 text-white rounded-tr-none'
@@ -114,16 +159,17 @@ const ChatAgent: React.FC = () => {
               )}
             </div>
 
-            <div className="p-4 bg-enterprise-900 border-t border-enterprise-800 flex gap-2">
-              <input
-                type="text"
+            <div className="p-4 bg-enterprise-900 border-t border-enterprise-800 flex gap-2 items-end">
+              <textarea
+                ref={textareaRef}
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
-                onKeyDown={(e) => e.key === 'Enter' && handleSend()}
+                onKeyDown={handleKeyDown}
                 placeholder="Message the agent..."
-                className="flex-1 bg-enterprise-950 border border-enterprise-800 rounded px-3 py-2 text-sm text-white focus:outline-none focus:border-enterprise-accent"
+                rows={1}
+                className="flex-1 bg-enterprise-950 border border-enterprise-800 rounded px-3 py-3 text-sm text-white focus:outline-none focus:border-enterprise-accent resize-none min-h-[44px] max-h-[120px]"
               />
-              <button onClick={handleSend} className="p-2 bg-enterprise-accent text-black rounded hover:bg-emerald-400 transition-colors">
+              <button onClick={handleSendClick} className="p-3 bg-enterprise-accent text-black rounded hover:bg-emerald-400 transition-colors h-[44px] flex items-center justify-center">
                 <Send size={18} />
               </button>
             </div>
@@ -142,6 +188,6 @@ const ChatAgent: React.FC = () => {
       </motion.button>
     </>
   );
-};
+});
 
 export default ChatAgent;
